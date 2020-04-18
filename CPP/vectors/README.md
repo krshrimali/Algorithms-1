@@ -77,3 +77,111 @@ void push_back(const value_type& __x)
         _M_realloc_insert(end(), __x);
 }
 ```
+
+A few notes to take:
+
+- `value_type`: This is the type of the elements in the vector container. That is, if the vector is `std::vector<std::vector<int> >`, then value_type of the given vector will be `std::vector<int>`. This comes handy later for type checking and more.
+- `_M_impl`: 
+- `_GLIBCXX_ASAN_ANNOTATE_GROW(1)`: The definition of this macro is:
+    
+    ```cpp
+    #define _GLIBCXX_ASAN_ANNOTATE_GROW(n) \
+        typename _Base::_Vector_impl::template _Asan<>::_Grow \
+            __attribute__((__unused__)) __grow_guard(this->_M_impl, (n))
+    ```
+
+    - The base struct `_Vector_base` defines these functions and structs. Let's take a look at struct `_Asan`. Essentially, all we want to do with the above macro is to grow the vector container memory by n. Since when we insert an element, we only need to grow by 1, so we pass 1 to the macro call.
+    
+    ```cpp
+    template<typename = _Tp_alloc_type>
+        struct _Asan
+        {
+            typedef typename __gnu_cxx::__alloc_traits<_Tp_alloc_type>::size_type size_type;
+
+            struct _Grow
+            {
+                _Grow(_Vector_impl&, size_type) { }
+                void _M_grew(size_type) { }
+            };
+
+            // ...
+        };
+    ```
+
+    If usage of Macros is new to you, please leave it for now as we'll discuss more about these design patterns in future.
+- A note on usage of `_M_impl`. It is declared as: `_Vector_impl& _M_impl` in the header file. `_Vector_impl` is a struct defined as:
+
+    ```cpp
+    struct _Vector_impl : public _Tp_alloc_type, public _Vector_impl_data
+    {
+        _Vector_impl() _GLIBCXX_NOEXCEPT_IF(is_nothrow_default_constructible<_Tp_alloc_type>::value) : _Tp_alloc_type() { }
+    }
+    // more overloads for the constructor
+    ```
+
+    The base struct `_Vector_impl_data` gives you helpful pointers to access later on:
+
+    ```cpp
+    struct _Vector_impl_data
+    {
+        pointer _M_start;
+        pointer _M_finish;
+        pointer _M_end_of_storage;
+
+        // overloads of constructors
+    }
+    ```
+
+    To go deep into the details is not useful here, but as you would have sensed, this helps us to access pointer to the start, finish and end of storage of the vector.
+
+You would have guessed by now, that `push_back` call will add the element to the end (observe `_Alloc_traits::construct(this->_M_impl, this->_M_impl._M_finish, __x);`) and will then increment the variable `_M_finish` by 1.
+
+Note how `push_back` first checks if there is memory available. Of course we have limited memory available with us, and it checks if the end location of the current vector container equals the end storage capacity:
+
+```cpp
+if (this->_M_impl._M_finish != this->_M_impl._M_end_of_storage) {
+    // ...
+} else {
+    _M_realloc_insert(end(), __x);
+}
+```
+
+So if we have reached the end of storage, it calls `_M_realloc_insert(end(), __x)`. Now what is this? Let's take a look at it's definition:
+
+```cpp
+template <typename _Tp, typename _Alloc>
+  template<typename... _Args>
+    void vector<_Tp, _Alloc>::_M_realloc_insert(iterator __position, _Args&&... __args) {
+        // ...
+        pointer __old_start = this->_M_impl._M_start;
+        pointer __old_finish = this->_M_impl._M_finish;
+        // Here we have passed __position as end()
+        // So __elems_before will be total number of elements in our original vector
+        const size_type __elems_before = __position - begin();
+        
+        // Declare new starting and finishing pointers
+        pointer __new_start(this->_M_allocate(__len));
+        pointer __new_finish(__new_start);
+
+        __try
+        {
+            // Allocate memory and copy original vector to the new memory locations
+        }
+        __catch(...)
+
+        // Destroy the original memory location
+        std::_Destroy(__old_start, __old_finish, _M_get_Tp_allocator());
+        
+        // Change starting, finishing and end of storage pointers to new pointers
+        this->_M_impl._M_start = __new_start;
+        this->_M_impl._M_finish = __new_finish;
+        // here __len is 1
+        this->_M_impl._M_end_of_storage = __new_start + __len;
+    }
+```
+
+Even though the above piece of code might scare a few (it did scare me when I looked at it for the first time), but just saying - this is just 10% of the definition of `_M_realloc_insert`.
+
+If you haven't noticed so far, there is something very puzzling in the code: `template<typename... _Args>` -- these are variadic arguments introduced in C++11. We'll talk about them later in the series of blogs.
+
+Intuitively, by calling `_M_realloc_insert(end(), __x)` all we are trying to do is reallocate memory (end_of_storage + 1), copy the original vector data to the new memory locations, add `__x` and deallocate (or destroy) the original memory in the heap. This also allows to keep vector to have contiguous memory allocation.
